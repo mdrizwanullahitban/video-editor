@@ -7,13 +7,14 @@
 <div class="heading"><div><p class="eyebrow">YOUR STORY. EVERY LANGUAGE.</p><h1>Make every word<br/><em>worth watching.</em></h1><p class="intro">Trim your clips. Create subtitles. Reach your audience in Hindi, English, and Hinglish.</p></div><div class="badge">✦<br/><small>Made for<br/>your voice</small></div></div>
 <div class="workspace">
 <section class="panel preview"><div class="section-title"><span>01 / YOUR VIDEO</span><span class="muted">MP4 · MOV · WEBM</span></div>
-@if (project is null) {<label class="upload"><span class="upload-icon">↑</span><h2>Drop a story in the frame</h2><p>Choose a video to start editing · up to 500 MB</p><span class="button">Choose video</span><InputFile OnChange="Upload" accept="video/mp4,video/quicktime,video/webm" disabled="@busy"/></label>}
+@if (project is null) {<label class="upload"><span class="upload-icon">↑</span><h2>Drop a story in the frame</h2><p>Choose a video to start editing · up to 1 GB (1,024 MB)</p><span class="button">Choose video</span><InputFile OnChange="Upload" accept="video/mp4,video/quicktime,video/webm" disabled="@busy"/></label>}
 else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video><div class="file-info"><strong>@project.Name</strong><span>@project.Duration.ToString("0.0") seconds</span></div><label class="replace">Replace video<InputFile OnChange="Upload" accept="video/*" disabled="@busy"/></label>}
 <div class="timeline"><span>START</span><div></div><span>END</span></div>
 <div class="trim"><label>In point (seconds)<input type="number" min="0" step="0.1" @bind="start" disabled="@busy"/></label><span>→</span><label>Out point (seconds)<input type="number" min="0" step="0.1" @bind="end" disabled="@busy"/></label></div>
 </section>
 <aside class="panel"><div class="section-title">02 / AI SUBTITLES <span>✦</span></div><h2>Your words.<br/>A wider world.</h2><p class="muted">Transcribe speech, then choose how your subtitles read.</p><label>Subtitle language<select @bind="language" disabled="@busy"><option value="English">English</option><option value="Hindi">हिन्दी · Hindi</option><option value="Hinglish">Hinglish · Roman Hindi</option></select></label><label>Text size<select @bind="fontSize" disabled="@busy"><option value="20">Small</option><option value="28">Medium</option><option value="36">Large</option></select></label><label>Text color<input type="color" @bind="color" disabled="@busy"/></label><button class="primary" @onclick="Generate" disabled="@(busy || project is null)">✦ Generate subtitles</button><p class="note">AI transcription uses your configured OpenAI API key. Review generated text before exporting.</p></aside>
 </div>
+@if(uploading) {<div class="status" role="status"><label>Uploading @uploadPercent%<progress max="100" value="@uploadPercent" style="width:100%"></progress></label><button @onclick="() => uploadCancellation?.Cancel()">Cancel upload</button></div>}
 @if (!string.IsNullOrEmpty(message)) {<div class="status" role="status">@message</div>}
 <section class="panel captions"><div class="section-title"><span>03 / THE FINISHING TOUCHES</span><span>@(project?.Segments.Count ?? 0) CAPTIONS</span></div><div class="caption-heading"><div><h2>Fine-tune your subtitles</h2><p class="muted">Adjust the words and timing, then make it yours.</p></div><button class="primary" @onclick="Export" disabled="@(busy || project is null)">Export video ↗</button></div>
 @if(project is null || project.Segments.Count == 0) {<p class="empty">Your captions will appear here. You can also add them manually.</p>}
@@ -22,9 +23,20 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
 </section><footer>CREATE WITH INTENTION. SHARE WITHOUT BORDERS.<span>FRAME / 2026</span></footer>
 </main>
 @code {
+ CancellationTokenSource? uploadCancellation; bool uploading; int uploadPercent;
  Project? project; bool busy, exported; string language="English", color="#ffffff", message=""; int fontSize=28; double start,end;
- async Task Run(Func<Task> action) {busy=true; exported=false; message="Working…"; try {await action(); message="Done. Your changes are ready.";} catch(Exception ex) {message=ex.Message;} finally {busy=false;}}
- Task Upload(InputFileChangeEventArgs e) => Run(async()=> {project=await Editor.Upload(e.File); start=0; end=project.Duration;});
+ async Task Run(Func<Task> action) {busy=true; exported=false; message="Working…"; try {await action(); message="Done. Your changes are ready.";} catch(OperationCanceledException) {message="Upload cancelled. You can choose another video.";} catch(Exception ex) {message=ex.Message;} finally {busy=false;}}
+ Task Upload(InputFileChangeEventArgs e) => Run(async()=> {
+  using var cancellation=new CancellationTokenSource(); uploadCancellation=cancellation; uploading=true; uploadPercent=0;
+  try {
+   var size=e.File.Size; var lastUpdate=System.Diagnostics.Stopwatch.StartNew();
+   project=await Editor.Upload(e.File, bytes=> {
+    if(lastUpdate.ElapsedMilliseconds<150 && bytes<size) return;
+    uploadPercent=(int)(bytes*100/Math.Max(1,size)); lastUpdate.Restart(); _=InvokeAsync(StateHasChanged);
+   }, cancellation.Token);
+   start=0; end=project.Duration;
+  } finally {uploading=false; uploadCancellation=null;}
+ });
  Task Generate()=>Run(async()=> {if(project is not null) await Editor.Transcribe(project,language);});
  Task Export()=>Run(async()=> {if(project is not null) {await Editor.Export(project,start,end,fontSize,color); exported=true;}});
  void AddCaption(){if(project is not null) {exported=false; project.Segments.Add(new(){Start=start,End=Math.Min(start+3,end),Text="Your subtitle"});}}

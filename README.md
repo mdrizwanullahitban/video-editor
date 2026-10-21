@@ -14,7 +14,18 @@ cd /workspace/video-editor
 
 `OPENAI_API_KEY` is also accepted for local setups. Set `FRAME_AI_API_KEY` securely in the server process environment to enable AI. Do not commit keys. Optional `OPENAI_TRANSLATION_MODEL` defaults to `gpt-4o-mini`. Speech recognition calls OpenAI `whisper-1`; a second AI request translates captions to English, Devanagari Hindi, or Roman Hindi/English Hinglish. These are paid remote operations and upload the video's extracted audio and caption text to OpenAI. Without a key, upload, manual captions, trimming, and export still work. Review AI output for transcription and translation errors.
 
-Caption timing is relative to the original video. Export clips intersecting captions and shifts their timing relative to the trim's start. Styling applies to burned-in captions; SRT and VTT retain timing/text. Video export re-encodes to H.264/AAC. Uploads are limited to 500 MB; AI extracted audio must be below 24 MB. Choose videos with audio for AI transcription.
+Caption timing is relative to the original video. Export clips intersecting captions and shifts their timing relative to the trim's start. Styling applies to burned-in captions; SRT and VTT retain timing/text. Video export re-encodes to H.264/AAC. Uploads accept up to **1 GB (1,024 MB / 1,073,741,824 bytes)** inclusive, streamed directly to disk with progress and cancellation. Keep the browser tab connected during uploads. Leave several GB of free disk space for the source, encoded export, and audio. FFmpeg operations have a two-hour timeout; a large file may take a long time depending on duration, resolution, and CPU. The Blazor stream timeout is 30 minutes; an exceptionally slow upload may need retrying. AI transcription is a separate limit: AI extracted audio must be below 24 MB. Choose videos with audio for AI transcription.
+
+## Windows / VS Code
+
+Open the cloned project folder and run in PowerShell:
+
+```powershell
+git pull origin main
+dotnet run --project VideoEditor.csproj --urls http://localhost:5000
+```
+
+Open http://localhost:5000 and keep the terminal running. Confirm `ffmpeg -version` and `ffprobe -version` work in that terminal. Install Noto Sans Devanagari for Hindi exports, then restart the app. To enable paid AI requests, set `$env:FRAME_AI_API_KEY` securely in the current terminal before starting the server; never share the value or commit it.
 
 ## First-version limitations
 

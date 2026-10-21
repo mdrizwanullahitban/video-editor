@@ -1,10 +1,10 @@
 using VideoEditor.Components;
 using VideoEditor;
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddRazorComponents().AddInteractiveServerComponents(options => options.JSInteropDefaultCallTimeout = TimeSpan.FromMinutes(30));
 builder.Services.AddSingleton<EditorService>();
 builder.Services.AddHttpClient();
-builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => o.MultipartBodyLengthLimit = 524288000);
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => o.MultipartBodyLengthLimit = EditorService.MaxUploadBytes);
 var app = builder.Build();
 app.UseStaticFiles();
 app.UseAntiforgery();

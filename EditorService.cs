@@ -12,15 +12,27 @@ public sealed class Project {
  public double Duration {get;set;} public List<Segment> Segments {get;set;} = []; public string? Output {get;set;}
 }
 public sealed class EditorService(IHttpClientFactory clients, IConfiguration config) {
+ public const long MaxUploadBytes = 1_073_741_824; // 1 GiB, inclusive
  readonly ConcurrentDictionary<Guid,Project> projects = new();
  readonly string root = Path.Combine(Path.GetTempPath(),"frame-video-editor");
  string Folder(Project p) => Path.Combine(root,p.Id.ToString());
- public async Task<Project> Upload(IBrowserFile file) {
+ public async Task<Project> Upload(IBrowserFile file, Action<long>? progress = null, CancellationToken cancellationToken = default) {
+  if(file.Size <= 0 || file.Size > MaxUploadBytes) throw new InvalidOperationException("Choose a nonempty video up to 1 GB (1,024 MB).");
   var ext=Path.GetExtension(file.Name).ToLowerInvariant();
   if(!new[]{".mp4",".mov",".webm"}.Contains(ext)) throw new InvalidOperationException("Choose an MP4, MOV, or WebM video.");
   var p=new Project{Name=Path.GetFileName(file.Name)}; Directory.CreateDirectory(Folder(p)); p.Source=Path.Combine(Folder(p),"source"+ext);
   try {
-   await using(var input=file.OpenReadStream(524288000)) await using(var output=File.Create(p.Source)) await input.CopyToAsync(output);
+   await using(var input=file.OpenReadStream(MaxUploadBytes, cancellationToken))
+   await using(var output=new FileStream(p.Source, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous)) {
+    var buffer=new byte[81920]; long total=0; int count;
+    while((count=await input.ReadAsync(buffer, cancellationToken))>0) {
+     total+=count;
+     if(total>MaxUploadBytes || total>file.Size) throw new InvalidOperationException("The upload exceeded its allowed size. Choose a video up to 1 GB.");
+     await output.WriteAsync(buffer.AsMemory(0,count), cancellationToken); progress?.Invoke(total);
+    }
+    if(total!=file.Size) throw new InvalidOperationException("The upload was interrupted. Please select the video again.");
+   }
+   cancellationToken.ThrowIfCancellationRequested();
    var probe=await Execute("ffprobe",["-v","error","-show_entries","format=duration:stream=codec_type","-of","json",p.Source]);
    using var doc=JsonDocument.Parse(probe);
    if(!doc.RootElement.GetProperty("streams").EnumerateArray().Any(s=>s.GetProperty("codec_type").GetString()=="video")) throw new InvalidOperationException("This file does not contain a video stream.");
@@ -77,10 +89,10 @@ public sealed class EditorService(IHttpClientFactory clients, IConfiguration con
   await Execute("ffmpeg",args,Folder(p)); File.Move(Path.Combine(Folder(p),"export.tmp.mp4"),Path.Combine(Folder(p),"export.mp4"),true); p.Output=Path.Combine(Folder(p),"export.mp4");
  }
  static async Task<string> Execute(string tool,IEnumerable<string> args,string? directory=null) {
-  var info=new ProcessStartInfo(tool){RedirectStandardError=true,RedirectStandardOutput=true,UseShellExecute=false,WorkingDirectory=directory??Environment.CurrentDirectory}; foreach(var arg in args) info.ArgumentList.Add(arg);
+  var info=new ProcessStartInfo(tool){RedirectStandardError=true,RedirectStandardOutput=true,UseShellExecute=false,WorkingDirectory=directory??Environment.CurrentDirectory}; if(tool=="ffmpeg") {info.ArgumentList.Add("-loglevel"); info.ArgumentList.Add("error");} foreach(var arg in args) info.ArgumentList.Add(arg);
   using var process=Process.Start(info)??throw new InvalidOperationException($"Could not start {tool}.");
   var stdout=process.StandardOutput.ReadToEndAsync(); var stderr=process.StandardError.ReadToEndAsync();
-  using var timeout=new CancellationTokenSource(TimeSpan.FromMinutes(20));
+  using var timeout=new CancellationTokenSource(TimeSpan.FromMinutes(120));
   try {await process.WaitForExitAsync(timeout.Token);} catch(OperationCanceledException){process.Kill(true); throw new InvalidOperationException("Video processing timed out. Try a shorter video.");}
   var result=await stdout; var error=await stderr;
   if(process.ExitCode!=0) {Console.Error.WriteLine(error); throw new InvalidOperationException($"{tool} could not process this video. Check that it contains supported video/audio streams; details are in the server log.");} return result;
