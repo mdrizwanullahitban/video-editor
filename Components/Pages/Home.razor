@@ -3,7 +3,7 @@
 @inject EditorService Editor
 <PageTitle>Frame · AI Video Editor</PageTitle>
 <header><a class="brand" href="/">◈ frame<span>STUDIO</span></a><span class="tag">AI VIDEO EDITOR</span></header>
-<main>
+<main inert="@busy">
 <div class="heading"><div><p class="eyebrow">YOUR STORY. EVERY LANGUAGE.</p><h1>Make every word<br/><em>worth watching.</em></h1><p class="intro">Trim your clips. Create subtitles. Reach your audience in Hindi, English, and Hinglish.</p></div><div class="badge">✦<br/><small>Made for<br/>your voice</small></div></div>
 <div class="workspace">
 <section class="panel preview"><div class="section-title"><span>01 / YOUR VIDEO</span><span class="muted">MP4 · MOV · WEBM</span></div>
@@ -14,7 +14,6 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
 </section>
 <aside class="panel"><div class="section-title">02 / AI SUBTITLES <span>✦</span></div><h2>Your words.<br/>A wider world.</h2><p class="muted">Transcribe speech, then choose how your subtitles read.</p><label>Subtitle language<select @bind="language" disabled="@busy"><option value="English">English</option><option value="Hindi">हिन्दी · Hindi</option><option value="Hinglish">Hinglish · Roman Hindi</option></select></label><label>Text size<select @bind="fontSize" disabled="@busy"><option value="20">Small</option><option value="28">Medium</option><option value="36">Large</option></select></label><label>Text color<input type="color" @bind="color" disabled="@busy"/></label><button class="primary" @onclick="Generate" disabled="@(busy || project is null)">✦ Generate subtitles</button><p class="note">AI transcription uses your configured OpenAI API key. Review generated text before exporting.</p></aside>
 </div>
-@if(uploading) {<div class="status" role="status"><label>Uploading @uploadPercent%<progress max="100" value="@uploadPercent" style="width:100%"></progress></label><button @onclick="() => uploadCancellation?.Cancel()">Cancel upload</button></div>}
 @if (!string.IsNullOrEmpty(message)) {<div class="status" role="status">@message</div>}
 <section class="panel captions"><div class="section-title"><span>03 / THE FINISHING TOUCHES</span><span>@(project?.Segments.Count ?? 0) CAPTIONS</span></div><div class="caption-heading"><div><h2>Fine-tune your subtitles</h2><p class="muted">Adjust the words and timing, then make it yours.</p></div><button class="primary" @onclick="Export" disabled="@(busy || project is null)">Export video ↗</button></div>
 @if(project is null || project.Segments.Count == 0) {<p class="empty">Your captions will appear here. You can also add them manually.</p>}
@@ -22,22 +21,39 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
 @if(exported && project is not null) {<div class="downloads"><a href="/download/@project.Id/mp4" download>Download video</a><a href="/download/@project.Id/srt" download>Download SRT</a><a href="/download/@project.Id/vtt" download>Download VTT</a></div>}
 </section><footer>CREATE WITH INTENTION. SHARE WITHOUT BORDERS.<span>FRAME / 2026</span></footer>
 </main>
+@if(busy) {
+ <div class="loading-backdrop"><section class="loading-card" role="dialog" aria-modal="true" aria-labelledby="loading-title" aria-describedby="loading-detail">
+  <div class="loading-orbit" aria-hidden="true">✦</div><p class="eyebrow">FRAME IS AT WORK</p>
+  <h2 id="loading-title">@loadingTitle</h2><p id="loading-detail" class="muted">@loadingDetail</p>
+  @if(uploading) {
+   <p class="loading-filename">@uploadName</p>
+   <div class="loading-metrics"><strong>@uploadPercent%</strong><span>@Size(uploadBytes) of @Size(uploadTotal)</span></div>
+   <progress aria-label="Video uploaded" max="100" value="@uploadPercent"></progress>
+   <p class="muted" role="status">@(uploadPercent==100 ? "Upload complete. Checking video format and duration…" : "Transferring your video. Keep this tab open.")</p>
+   @if(uploadPercent<100) {<button @onclick="CancelUpload" disabled="@cancelRequested">@(cancelRequested ? "Cancelling…" : "Cancel upload")</button>}
+  } else {<progress aria-label="Processing video"></progress><p class="muted">Keep this tab open. Longer videos can take several minutes.</p>}
+ </section></div>
+}
 @code {
- CancellationTokenSource? uploadCancellation; bool uploading; int uploadPercent;
+ CancellationTokenSource? uploadCancellation; bool uploading, cancelRequested; int uploadPercent;
+ long uploadBytes, uploadTotal; string uploadName="", loadingTitle="", loadingDetail="";
+ static string Size(long bytes) => $"{bytes / 1048576d:0.0} MB";
+ void CancelUpload() {cancelRequested=true; uploadCancellation?.Cancel();}
+ void Stage(string text) {loadingDetail=text; _=InvokeAsync(StateHasChanged);}
  Project? project; bool busy, exported; string language="English", color="#ffffff", message=""; int fontSize=28; double start,end;
- async Task Run(Func<Task> action) {busy=true; exported=false; message="Working…"; try {await action(); message="Done. Your changes are ready.";} catch(OperationCanceledException) {message="Upload cancelled. You can choose another video.";} catch(Exception ex) {message=ex.Message;} finally {busy=false;}}
+ async Task Run(Func<Task> action, string title) {loadingTitle=title; loadingDetail="Preparing your request…"; busy=true; exported=false; message="Working…"; try {await action(); message="Done. Your changes are ready.";} catch(OperationCanceledException) {message="Upload cancelled. You can choose another video.";} catch(Exception ex) {message=ex.Message;} finally {busy=false;}}
  Task Upload(InputFileChangeEventArgs e) => Run(async()=> {
-  using var cancellation=new CancellationTokenSource(); uploadCancellation=cancellation; uploading=true; uploadPercent=0;
+  using var cancellation=new CancellationTokenSource(); uploadCancellation=cancellation; uploading=true; uploadPercent=0; uploadBytes=0; uploadTotal=e.File.Size; uploadName=e.File.Name; cancelRequested=false; loadingDetail="Streaming your video securely to this editor.";
   try {
    var size=e.File.Size; var lastUpdate=System.Diagnostics.Stopwatch.StartNew();
    project=await Editor.Upload(e.File, bytes=> {
     if(lastUpdate.ElapsedMilliseconds<150 && bytes<size) return;
-    uploadPercent=(int)(bytes*100/Math.Max(1,size)); lastUpdate.Restart(); _=InvokeAsync(StateHasChanged);
+    uploadBytes=bytes; uploadPercent=(int)(bytes*100/Math.Max(1,size)); lastUpdate.Restart(); _=InvokeAsync(StateHasChanged);
    }, cancellation.Token);
    start=0; end=project.Duration;
   } finally {uploading=false; uploadCancellation=null;}
- });
- Task Generate()=>Run(async()=> {if(project is not null) await Editor.Transcribe(project,language);});
- Task Export()=>Run(async()=> {if(project is not null) {await Editor.Export(project,start,end,fontSize,color); exported=true;}});
+ }, "Bringing your video in");
+ Task Generate()=>Run(async()=> {if(project is not null) await Editor.Transcribe(project,language,Stage);}, "Creating your subtitles");
+ Task Export()=>Run(async()=> {if(project is not null) {await Editor.Export(project,start,end,fontSize,color); exported=true;}}, "Exporting your video");
  void AddCaption(){if(project is not null) {exported=false; project.Segments.Add(new(){Start=start,End=Math.Min(start+3,end),Text="Your subtitle"});}}
 }
