@@ -10,6 +10,31 @@ static async Task<string> Command(string name, params string[] args) {
  using var p=Process.Start(info)!; var output=p.StandardOutput.ReadToEndAsync(); var errors=p.StandardError.ReadToEndAsync(); await p.WaitForExitAsync(); if(p.ExitCode!=0)throw new Exception(await errors); return await output;
 }
 static void Check(bool result,string name){if(!result)throw new Exception("FAILED: "+name);Console.WriteLine("PASS: "+name);}
+if(args.Contains("--web-assets-only")) {
+ var directory=new DirectoryInfo(AppContext.BaseDirectory);
+ while(directory is not null && !File.Exists(Path.Combine(directory.FullName,"VideoEditor.csproj"))) directory=directory.Parent;
+ if(directory is null)throw new Exception("Cannot locate application checkout");
+ var listener=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);listener.Start();var port=((System.Net.IPEndPoint)listener.LocalEndpoint).Port;listener.Stop();
+ var start=new ProcessStartInfo(Environment.ProcessPath!){WorkingDirectory=directory.FullName,RedirectStandardOutput=true,RedirectStandardError=true};
+ // The checks executable can be launched through dotnet or its native apphost.
+ start.FileName=Path.Combine(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),"..","..","..",OperatingSystem.IsWindows()?"dotnet.exe":"dotnet");
+ var configuration=AppContext.BaseDirectory.Contains(Path.DirectorySeparatorChar+"Release"+Path.DirectorySeparatorChar)?"Release":"Debug";
+ start.ArgumentList.Add(Path.Combine(directory.FullName,"bin",configuration,"net10.0","VideoEditor.dll"));start.ArgumentList.Add("--urls");start.ArgumentList.Add($"http://127.0.0.1:{port}");
+ start.Environment["ASPNETCORE_ENVIRONMENT"]="Production";start.Environment["DOTNET_ENVIRONMENT"]="Production";
+ using var server=Process.Start(start)!;var logs=server.StandardOutput.ReadToEndAsync();var errors=server.StandardError.ReadToEndAsync();
+ try {
+  using var client=new HttpClient{BaseAddress=new Uri($"http://127.0.0.1:{port}"),Timeout=TimeSpan.FromSeconds(2)};bool ready=false;
+  for(var attempt=0;attempt<100;attempt++) {
+   if(server.HasExited)throw new Exception("Application exited: "+await errors);
+   try {using var response=await client.GetAsync("/");if(response.IsSuccessStatusCode){ready=true;break;}}catch(HttpRequestException){}catch(TaskCanceledException){}
+   await Task.Delay(100);
+  }
+  Check(ready,"application starts in Production");
+  using var script=await client.GetAsync("/_framework/blazor.web.js");Check(script.IsSuccessStatusCode && (await script.Content.ReadAsStringAsync()).Length>1000,"Blazor framework script available in Production");
+  var html=await client.GetStringAsync("/");Check(html.Contains("Generate subtitles") && html.Contains("blazor.web"),"interactive editor page references framework script");
+ } finally {if(!server.HasExited)server.Kill(true);await server.WaitForExitAsync();await logs;await errors;}
+ return;
+}
 var fixture=Path.Combine(Path.GetTempPath(),"frame-test-"+Guid.NewGuid()+".mp4");
 await Command("ffmpeg","-y","-f","lavfi","-i","color=c=blue:s=320x240:r=25:d=4","-f","lavfi","-i","sine=frequency=440:duration=4","-c:v","libx264","-threads","2","-c:a","aac","-shortest",fixture);
 var services=new ServiceCollection().AddHttpClient().BuildServiceProvider();

@@ -36,3 +36,9 @@ For a trusted local/single-user environment only. There is no account system or 
 In the cloud set `DOTNET_CLI_HOME=/workspace/tools/dotnet-home`, `NUGET_PACKAGES=/workspace/tools/nuget`, and `XDG_CACHE_HOME=/tmp/frame-cache` for writable caches. The sandbox may require approval for .NET named-mutex operations.
 
 `dotnet build` checks the application. `dotnet run --project checks/Frame.Checks.csproj` runs a dependency-free functional check for actual video upload/probing, trimmed caption timing, invalid input rejection, subtitle burn-in/export, and output streams. It requires FFmpeg and ffprobe.
+
+### Browser startup regression check
+
+Run `dotnet run --project checks/Frame.Checks.csproj -- --web-assets-only` to start an isolated Production instance and verify that the page and Blazor framework script are served. A missing framework script prevents all upload/editor event handlers from running. `MapStaticAssets` and `UseStaticWebAssets` enable these assets for local Production runs. The stylesheet and script use fingerprinted asset URLs so updates are not hidden by stale browser caches.
+
+The upload overlay was also checked in Chromium with a 64 MB video: intermediate upload percentages, successful video preview, and cancellation. These browser checks used local media and did not call AI services.

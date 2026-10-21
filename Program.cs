@@ -1,12 +1,15 @@
 using VideoEditor.Components;
 using VideoEditor;
 var builder = WebApplication.CreateBuilder(args);
+// Load SDK/package assets when dotnet run uses the default Production environment.
+builder.WebHost.UseStaticWebAssets();
 builder.Services.AddRazorComponents().AddInteractiveServerComponents(options => options.JSInteropDefaultCallTimeout = TimeSpan.FromMinutes(30));
 builder.Services.AddSingleton<EditorService>();
 builder.Services.AddHttpClient();
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => o.MultipartBodyLengthLimit = EditorService.MaxUploadBytes);
 var app = builder.Build();
 app.UseStaticFiles();
+app.MapStaticAssets();
 app.UseAntiforgery();
 app.MapGet("/media/{id:guid}", (Guid id, EditorService editor) => editor.Media(id));
 app.MapGet("/download/{id:guid}/{format}", (Guid id, string format, EditorService editor) => editor.Download(id, format));
