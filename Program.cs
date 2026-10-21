@@ -1,0 +1,14 @@
+using VideoEditor.Components;
+using VideoEditor;
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+builder.Services.AddSingleton<EditorService>();
+builder.Services.AddHttpClient();
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(o => o.MultipartBodyLengthLimit = 524288000);
+var app = builder.Build();
+app.UseStaticFiles();
+app.UseAntiforgery();
+app.MapGet("/media/{id:guid}", (Guid id, EditorService editor) => editor.Media(id));
+app.MapGet("/download/{id:guid}/{format}", (Guid id, string format, EditorService editor) => editor.Download(id, format));
+app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+app.Run();
