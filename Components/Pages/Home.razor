@@ -2,9 +2,16 @@
 @rendermode InteractiveServer
 @inject EditorService Editor
 <PageTitle>Frame · AI Video Editor</PageTitle>
-<header><a class="brand" href="/">◈ frame<span>STUDIO</span></a><span class="tag">AI VIDEO EDITOR</span></header>
+<header><a class="brand" href="/">◈ frame<span>STUDIO</span></a><span class="tag">AI VIDEO EDITOR</span>@if(Editor.CloudEnabled) {<form method="post" action="/logout"><AntiforgeryToken/><button type="submit">Sign out</button></form>}</header>
 <main inert="@busy">
 <div class="heading"><div><p class="eyebrow">YOUR STORY. EVERY LANGUAGE.</p><h1>Make every word<br/><em>worth watching.</em></h1><p class="intro">Trim your clips. Create subtitles. Reach your audience in Hindi, English, and Hinglish.</p></div><div class="badge">✦<br/><small>Made for<br/>your voice</small></div></div>
+@if(Editor.CloudEnabled) {
+ <section class="panel cloud-library"><div class="section-title"><span>YOUR PRIVATE CLOUD LIBRARY</span><span>R2 STORAGE</span></div>
+ @if(savedProjects.Count==0) {<p class="muted">Upload a video to save your first cloud project.</p>}
+ @foreach(var saved in savedProjects) {<div class="cloud-project"><button disabled="@busy" @onclick="() => OpenCloud(saved)">@saved.Name <span>↗</span></button><button disabled="@busy" @onclick="() => pendingDelete=saved.Id">Delete</button></div>}
+ @if(pendingDelete is not null) {<div class="status"><p>Delete this cloud project, its video, and all exports permanently?</p><button @onclick="DeleteCloud" disabled="@busy">Delete permanently</button><button @onclick="() => pendingDelete=null">Keep project</button></div>}
+ </section>
+}
 <div class="workspace">
 <section class="panel preview"><div class="section-title"><span>01 / YOUR VIDEO</span><span class="muted">MP4 · MOV · WEBM</span></div>
 @if (project is null) {<label class="upload"><span class="upload-icon">↑</span><h2>Drop a story in the frame</h2><p>Choose a video to start editing · up to 1 GB (1,024 MB)</p><span class="button">Choose video</span><InputFile OnChange="Upload" accept="video/mp4,video/quicktime,video/webm" disabled="@busy"/></label>}
@@ -17,7 +24,7 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
 @if (!string.IsNullOrEmpty(message)) {<div class="status" role="status">@message</div>}
 <section class="panel captions"><div class="section-title"><span>03 / THE FINISHING TOUCHES</span><span>@(project?.Segments.Count ?? 0) CAPTIONS</span></div><div class="caption-heading"><div><h2>Fine-tune your subtitles</h2><p class="muted">Adjust the words and timing, then make it yours.</p></div><button class="primary" @onclick="Export" disabled="@(busy || project is null)">Export video ↗</button></div>
 @if(project is null || project.Segments.Count == 0) {<p class="empty">Your captions will appear here. You can also add them manually.</p>}
-@if(project is not null) { @foreach(var segment in project.Segments) {<div class="caption-row"><input aria-label="Caption start seconds" type="number" step="0.1" @bind="segment.Start" disabled="@busy"/><input aria-label="Caption end seconds" type="number" step="0.1" @bind="segment.End" disabled="@busy"/><textarea aria-label="Caption text" @bind="segment.Text" disabled="@busy"></textarea><button @onclick="() => project.Segments.Remove(segment)" disabled="@busy" aria-label="Delete caption">×</button></div>}<button @onclick="AddCaption" disabled="@busy">+ Add caption</button>}
+@if(project is not null) { @foreach(var segment in project.Segments) {<div class="caption-row"><input aria-label="Caption start seconds" type="number" step="0.1" @bind="segment.Start" disabled="@busy"/><input aria-label="Caption end seconds" type="number" step="0.1" @bind="segment.End" disabled="@busy"/><textarea aria-label="Caption text" @bind="segment.Text" disabled="@busy"></textarea><button @onclick="() => project.Segments.Remove(segment)" disabled="@busy" aria-label="Delete caption">×</button></div>}<button @onclick="AddCaption" disabled="@busy">+ Add caption</button>@if(Editor.CloudEnabled) {<button @onclick="SaveCloud" disabled="@busy">Save project to cloud</button>}}
 @if(exported && project is not null) {<div class="downloads"><a href="/download/@project.Id/mp4" download>Download video</a><a href="/download/@project.Id/srt" download>Download SRT</a><a href="/download/@project.Id/vtt" download>Download VTT</a></div>}
 </section><footer>CREATE WITH INTENTION. SHARE WITHOUT BORDERS.<span>FRAME / 2026</span></footer>
 </main>
@@ -29,12 +36,18 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
    <p class="loading-filename">@uploadName</p>
    <div class="loading-metrics"><strong>@uploadPercent%</strong><span>@Size(uploadBytes) of @Size(uploadTotal)</span></div>
    <progress aria-label="Video uploaded" max="100" value="@uploadPercent"></progress>
-   <p class="muted" role="status">@(uploadPercent==100 ? "Upload complete. Checking video format and duration…" : "Transferring your video. Keep this tab open.")</p>
+   <p class="muted" role="status">@(uploadPercent==100 ? loadingDetail : "Transferring your video. Keep this tab open.")</p>
    @if(uploadPercent<100) {<button @onclick="CancelUpload" disabled="@cancelRequested">@(cancelRequested ? "Cancelling…" : "Cancel upload")</button>}
   } else {<progress aria-label="Processing video"></progress><p class="muted">Keep this tab open. Longer videos can take several minutes.</p>}
  </section></div>
 }
 @code {
+ Guid? pendingDelete;
+ Task DeleteCloud()=>Run(async()=>{if(pendingDelete is Guid id){await Editor.DeleteProject(id);if(project?.Id==id){project=null;exported=false;}pendingDelete=null;savedProjects=await Editor.ListProjects();}},"Deleting your cloud project");
+ List<ProjectRecord> savedProjects=[];
+ protected override async Task OnInitializedAsync() {try {savedProjects=await Editor.ListProjects();}catch {message="Cloud storage is unavailable. Check the private bucket credentials in the hosting settings.";}}
+ Task OpenCloud(ProjectRecord record)=>Run(async()=>{Stage("Restoring your video from private cloud storage…");project=await Editor.OpenProject(record.Id);start=project.TrimStart;end=project.TrimEnd??project.Duration;fontSize=project.FontSize;color=project.Color;exported=record.HasExport;},"Opening your cloud project");
+ Task SaveCloud()=>Run(async()=>{if(project is not null){project.TrimStart=start;project.TrimEnd=end;project.FontSize=fontSize;project.Color=color;await Editor.SaveProject(project);savedProjects=await Editor.ListProjects();}},"Saving your project");
  CancellationTokenSource? uploadCancellation; bool uploading, cancelRequested; int uploadPercent;
  long uploadBytes, uploadTotal; string uploadName="", loadingTitle="", loadingDetail="";
  static string Size(long bytes) => $"{bytes / 1048576d:0.0} MB";
@@ -49,8 +62,8 @@ else {<video controls src="@($"/media/{project.Id}")" @key="project.Id"></video>
    project=await Editor.Upload(e.File, bytes=> {
     if(lastUpdate.ElapsedMilliseconds<150 && bytes<size) return;
     uploadBytes=bytes; uploadPercent=(int)(bytes*100/Math.Max(1,size)); lastUpdate.Restart(); _=InvokeAsync(StateHasChanged);
-   }, cancellation.Token);
-   start=0; end=project.Duration;
+   }, cancellation.Token, Stage);
+   start=0; end=project.Duration; savedProjects=await Editor.ListProjects();
   } finally {uploading=false; uploadCancellation=null;}
  }, "Bringing your video in");
  Task Generate()=>Run(async()=> {if(project is not null) await Editor.Transcribe(project,language,Stage);}, "Creating your subtitles");

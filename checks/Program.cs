@@ -10,7 +10,8 @@ static async Task<string> Command(string name, params string[] args) {
  using var p=Process.Start(info)!; var output=p.StandardOutput.ReadToEndAsync(); var errors=p.StandardError.ReadToEndAsync(); await p.WaitForExitAsync(); if(p.ExitCode!=0)throw new Exception(await errors); return await output;
 }
 static void Check(bool result,string name){if(!result)throw new Exception("FAILED: "+name);Console.WriteLine("PASS: "+name);}
-if(args.Contains("--web-assets-only")) {
+if(args.Contains("--web-assets-only")||args.Contains("--cloud-auth-only")) {
+ var authCheck=args.Contains("--cloud-auth-only");
  var directory=new DirectoryInfo(AppContext.BaseDirectory);
  while(directory is not null && !File.Exists(Path.Combine(directory.FullName,"VideoEditor.csproj"))) directory=directory.Parent;
  if(directory is null)throw new Exception("Cannot locate application checkout");
@@ -21,17 +22,37 @@ if(args.Contains("--web-assets-only")) {
  var configuration=AppContext.BaseDirectory.Contains(Path.DirectorySeparatorChar+"Release"+Path.DirectorySeparatorChar)?"Release":"Debug";
  start.ArgumentList.Add(Path.Combine(directory.FullName,"bin",configuration,"net10.0","VideoEditor.dll"));start.ArgumentList.Add("--urls");start.ArgumentList.Add($"http://127.0.0.1:{port}");
  start.Environment["ASPNETCORE_ENVIRONMENT"]="Production";start.Environment["DOTNET_ENVIRONMENT"]="Production";
+ if(authCheck) {
+  start.Environment["FRAME_CLOUD_MODE"]="true";start.Environment["FRAME_ADMIN_PASSWORD"]="test-only-owner-password";start.Environment["FRAME_AI_API_KEY"]="test-only-placeholder";
+  start.Environment["R2_ACCOUNT_ID"]=new string('a',32);start.Environment["R2_BUCKET_NAME"]="test-bucket";start.Environment["R2_ACCESS_KEY_ID"]="test-only-placeholder";start.Environment["R2_SECRET_ACCESS_KEY"]="test-only-placeholder";
+ }
  using var server=Process.Start(start)!;var logs=server.StandardOutput.ReadToEndAsync();var errors=server.StandardError.ReadToEndAsync();
  try {
-  using var client=new HttpClient{BaseAddress=new Uri($"http://127.0.0.1:{port}"),Timeout=TimeSpan.FromSeconds(2)};bool ready=false;
+  using var client=new HttpClient(new HttpClientHandler{AllowAutoRedirect=false}){BaseAddress=new Uri($"http://127.0.0.1:{port}"),Timeout=TimeSpan.FromSeconds(2)};bool ready=false;
   for(var attempt=0;attempt<100;attempt++) {
    if(server.HasExited)throw new Exception("Application exited: "+await errors);
-   try {using var response=await client.GetAsync("/");if(response.IsSuccessStatusCode){ready=true;break;}}catch(HttpRequestException){}catch(TaskCanceledException){}
+   try {using var response=await client.GetAsync("/health");if(response.IsSuccessStatusCode){ready=true;break;}}catch(HttpRequestException){}catch(TaskCanceledException){}
    await Task.Delay(100);
   }
   Check(ready,"application starts in Production");
   using var script=await client.GetAsync("/_framework/blazor.web.js");Check(script.IsSuccessStatusCode && (await script.Content.ReadAsStringAsync()).Length>1000,"Blazor framework script available in Production");
+  if(authCheck) {
+   using var blocked=await client.GetAsync("/media/00000000-0000-0000-0000-000000000000");Check(blocked.StatusCode==System.Net.HttpStatusCode.Redirect && blocked.Headers.Location!.ToString().Contains("/login"),"private media requires sign-in");
+   using var home=await client.GetAsync("/");Check(home.StatusCode==System.Net.HttpStatusCode.Redirect,"editor requires sign-in");
+   using var csrf=await client.PostAsync("/login",new FormUrlEncodedContent(new Dictionary<string,string>{{"password","test-only-owner-password"}}));Check(csrf.StatusCode==System.Net.HttpStatusCode.BadRequest,"login rejects missing antiforgery token");
+   var login=await client.GetStringAsync("/login");
+   var token=System.Net.WebUtility.HtmlDecode(System.Text.RegularExpressions.Regex.Match(login,"name=\"__RequestVerificationToken\" value=\"([^\"]+)\"").Groups[1].Value);
+   using var denied=await client.PostAsync("/login",new FormUrlEncodedContent(new Dictionary<string,string>{{"password","incorrect-password"},{"__RequestVerificationToken",token}}));Check(denied.StatusCode==System.Net.HttpStatusCode.Unauthorized,"wrong workspace password rejected");
+   using var signedIn=await client.PostAsync("/login",new FormUrlEncodedContent(new Dictionary<string,string>{{"password","test-only-owner-password"},{"__RequestVerificationToken",token}}));
+   Check(signedIn.StatusCode==System.Net.HttpStatusCode.Redirect,"owner can sign in");
+   var cookie=signedIn.Headers.GetValues("Set-Cookie").Single(x=>x.StartsWith("frame.session="));Check(cookie.Contains("secure",StringComparison.OrdinalIgnoreCase)&&cookie.Contains("httponly",StringComparison.OrdinalIgnoreCase),"session cookie requires HTTPS and blocks JavaScript access");
+   using var authenticated=new HttpRequestMessage(HttpMethod.Get,"/media/00000000-0000-0000-0000-000000000000");authenticated.Headers.Add("Cookie",cookie.Split(';')[0]);
+   using var permitted=await client.SendAsync(authenticated);Check(permitted.StatusCode==System.Net.HttpStatusCode.NotFound,"authenticated owner reaches private media endpoint");
+   System.Net.HttpStatusCode last=0;for(var i=0;i<4;i++){using var throttled=await client.PostAsync("/login",new FormUrlEncodedContent(new Dictionary<string,string>{{"password","incorrect-password"},{"__RequestVerificationToken",token}}));last=throttled.StatusCode;}
+   Check(last==System.Net.HttpStatusCode.TooManyRequests,"repeated sign-in attempts are rate limited");
+  } else {
   var html=await client.GetStringAsync("/");Check(html.Contains("Generate subtitles") && html.Contains("blazor.web"),"interactive editor page references framework script");
+  }
  } finally {if(!server.HasExited)server.Kill(true);await server.WaitForExitAsync();await logs;await errors;}
  return;
 }
@@ -74,6 +95,19 @@ try {
  using var probe=JsonDocument.Parse(await Command("ffprobe","-v","error","-show_entries","format=duration:stream=codec_type","-of","json",project.Output!));
  Check(Math.Abs(double.Parse(probe.RootElement.GetProperty("format").GetProperty("duration").GetString()!,System.Globalization.CultureInfo.InvariantCulture)-2)<.2,"export duration equals selected trim");
  Check(probe.RootElement.GetProperty("streams").EnumerateArray().Count()==2,"export retains video and audio streams");
+ var cloudStore=new MemoryCloud();
+ var cloudEditor=new EditorService(services.GetRequiredService<IHttpClientFactory>(),new ConfigurationBuilder().Build(),cloudStore);
+ var persisted=await cloudEditor.Upload(new BrowserFile(fixture));
+ try {
+  persisted.Segments=[new(){Start=0,End=1,Text="Saved cloud caption"}];await cloudEditor.SaveProject(persisted);
+  Directory.Delete(Path.GetDirectoryName(persisted.Source)!,true);
+  var restarted=new EditorService(services.GetRequiredService<IHttpClientFactory>(),new ConfigurationBuilder().Build(),cloudStore);
+  var records=await restarted.ListProjects();Check(records.Count==1&&records[0].Id==persisted.Id,"cloud library lists persisted project metadata (mock object store)");
+  var restored=await restarted.OpenProject(persisted.Id);Check(File.Exists(restored.Source)&&restored.Segments[0].Text=="Saved cloud caption","project and source restore after service restart and local deletion (mock object store)");
+  await restarted.Export(restored,0,1,28,"#ffffff");Check(cloudStore.Exported&&cloudStore.Record!.HasExport,"cloud export uploads video/subtitles and saves metadata (mock object store)");
+  Check(await restarted.Download(restored.Id,"mp4") is Microsoft.AspNetCore.Http.HttpResults.RedirectHttpResult redirect&&redirect.Url=="https://storage.example.test/signed-video","private download uses expiring storage URL (mock object store)");
+  await restarted.DeleteProject(restored.Id);Check((await restarted.ListProjects()).Count==0&&!File.Exists(restored.Source),"project deletion removes cloud metadata and local cached media (mock object store)");
+ } finally {if(Directory.Exists(Path.GetDirectoryName(persisted.Source)!))Directory.Delete(Path.GetDirectoryName(persisted.Source)!,true);}
  var aiStages=new List<string>();
  foreach(var model in new[]{"gpt-4o-transcribe-diarize","whisper-1"}) {
   var handler=new SubtitleHandler(model);
@@ -114,4 +148,16 @@ sealed class SubtitleHandler(string model):HttpMessageHandler {
   var content=JsonSerializer.Serialize(new{choices=new[]{new{message=new{content=JsonSerializer.Serialize(new{texts=new[]{"Namaste dosto"}})}}}});
   return new(System.Net.HttpStatusCode.OK){Content=new StringContent(content)};
  }
+}
+
+sealed class MemoryCloud:ICloudProjectStore {
+ public Task Delete(Guid id){if(Record?.Id==id){Record=null;source=[];}return Task.CompletedTask;}
+ public bool Enabled=>true;public ProjectRecord? Record;byte[] source=[];public bool Exported;
+ public async Task SaveOriginal(Project p){source=await File.ReadAllBytesAsync(p.Source);await SaveProject(p);}
+ public Task SaveProject(Project p){Record=new(p.Id,p.Name,p.Duration,Path.GetExtension(p.Source),p.Segments.Select(x=>new Segment{Start=x.Start,End=x.End,Text=x.Text}).ToList(),p.Output is not null,new FileInfo(p.Source).Length);return Task.CompletedTask;}
+ public async Task SaveExports(Project p){Exported=File.Exists(p.Output)&&File.Exists(Path.ChangeExtension(p.Output,"srt"))&&File.Exists(Path.ChangeExtension(p.Output,"vtt"));await SaveProject(p);}
+ public Task<List<ProjectRecord>> List()=>Task.FromResult(Record is null?new List<ProjectRecord>():[Record]);
+ public Task<ProjectRecord?> Find(Guid id)=>Task.FromResult(Record?.Id==id?Record:null);
+ public Task RestoreOriginal(ProjectRecord record,string destination)=>File.WriteAllBytesAsync(destination,source);
+ public Task<string?> DownloadUrl(Guid id,string format)=>Task.FromResult<string?>("https://storage.example.test/signed-video");
 }

@@ -9,14 +9,42 @@ namespace VideoEditor;
 public sealed class Segment { public double Start {get;set;} public double End {get;set;} public string Text {get;set;} = ""; }
 public sealed class Project {
  public Guid Id {get;init;} = Guid.NewGuid(); public string Name {get;init;} = ""; public string Source {get;set;} = "";
- public double Duration {get;set;} public List<Segment> Segments {get;set;} = []; public string? Output {get;set;}
+ public double TrimStart {get;set;} public double? TrimEnd {get;set;} public int FontSize {get;set;}=28; public string Color {get;set;}="#ffffff";
+ public double Duration {get;set;} public List<Segment> Segments {get;set;} = []; public string? Output {get;set;} public bool CloudExportAvailable {get;set;} public string? CloudExportVersion {get;set;}
 }
-public sealed class EditorService(IHttpClientFactory clients, IConfiguration config) {
+public sealed class EditorService(IHttpClientFactory clients, IConfiguration config, ICloudProjectStore? cloud = null) {
+ readonly ICloudProjectStore cloudStore=cloud??new R2ProjectStore(config);
+ readonly SemaphoreSlim jobs=new(1,1);
+ public bool CloudEnabled=>cloudStore.Enabled;
+ public Task<List<ProjectRecord>> ListProjects()=>cloudStore.List();
+ public Task SaveProject(Project p)=>cloudStore.SaveProject(p);
+ public async Task DeleteProject(Guid id) {
+  if(!await jobs.WaitAsync(0))throw new InvalidOperationException("Wait for the active video operation to finish before deleting a project.");
+  try {
+   await cloudStore.Delete(id);projects.TryRemove(id,out _);
+   var folder=Path.Combine(root,id.ToString());if(Directory.Exists(folder))Directory.Delete(folder,true);
+  }finally{jobs.Release();}
+ }
+ public async Task<Project> OpenProject(Guid id) {
+  if(projects.TryGetValue(id,out var cached))return cached;
+  var record=await cloudStore.Find(id)??throw new InvalidOperationException("This cloud project was not found.");
+  if(!new[]{".mp4",".mov",".webm"}.Contains(record.Extension))throw new InvalidOperationException("Invalid cloud project format.");
+  var p=new Project{Id=record.Id,Name=record.Name,Duration=record.Duration,Segments=record.Segments,CloudExportAvailable=record.HasExport,CloudExportVersion=record.ExportVersion,TrimStart=record.TrimStart,TrimEnd=record.TrimEnd,FontSize=record.FontSize,Color=record.Color};Directory.CreateDirectory(Folder(p));p.Source=Path.Combine(Folder(p),"source"+record.Extension);
+  if(!File.Exists(p.Source)||new FileInfo(p.Source).Length!=record.SourceBytes) {
+   var temp=p.Source+".download";
+   try {await cloudStore.RestoreOriginal(record,temp);File.Move(temp,p.Source,true);}finally {if(File.Exists(temp))File.Delete(temp);}
+  }
+  projects[p.Id]=p;return p;
+ }
  public const long MaxUploadBytes = 1_073_741_824; // 1 GiB, inclusive
  readonly ConcurrentDictionary<Guid,Project> projects = new();
  readonly string root = Path.Combine(Path.GetTempPath(),"frame-video-editor");
  string Folder(Project p) => Path.Combine(root,p.Id.ToString());
- public async Task<Project> Upload(IBrowserFile file, Action<long>? progress = null, CancellationToken cancellationToken = default) {
+ public async Task<Project> Upload(IBrowserFile file, Action<long>? progress = null, CancellationToken cancellationToken = default, Action<string>? stage = null) {
+  if(!await jobs.WaitAsync(0))throw new InvalidOperationException("Another video is being uploaded or processed. Please wait for it to finish.");
+  try {return await UploadCore(file,progress,cancellationToken,stage);}finally{jobs.Release();}
+ }
+ async Task<Project> UploadCore(IBrowserFile file, Action<long>? progress, CancellationToken cancellationToken, Action<string>? stage) {
   if(file.Size <= 0 || file.Size > MaxUploadBytes) throw new InvalidOperationException("Choose a nonempty video up to 1 GB (1,024 MB).");
   var ext=Path.GetExtension(file.Name).ToLowerInvariant();
   if(!new[]{".mp4",".mov",".webm"}.Contains(ext)) throw new InvalidOperationException("Choose an MP4, MOV, or WebM video.");
@@ -33,20 +61,28 @@ public sealed class EditorService(IHttpClientFactory clients, IConfiguration con
     if(total!=file.Size) throw new InvalidOperationException("The upload was interrupted. Please select the video again.");
    }
    cancellationToken.ThrowIfCancellationRequested();
+   stage?.Invoke("Upload complete. Checking video format and duration…");
    var probe=await Execute("ffprobe",["-v","error","-show_entries","format=duration:stream=codec_type","-of","json",p.Source]);
    using var doc=JsonDocument.Parse(probe);
    if(!doc.RootElement.GetProperty("streams").EnumerateArray().Any(s=>s.GetProperty("codec_type").GetString()=="video")) throw new InvalidOperationException("This file does not contain a video stream.");
    p.Duration=double.Parse(doc.RootElement.GetProperty("format").GetProperty("duration").GetString()!,CultureInfo.InvariantCulture);
    if(!double.IsFinite(p.Duration)||p.Duration<=0) throw new InvalidOperationException("The video duration could not be read.");
-   projects[p.Id]=p; return p;
+   if(cloudStore.Enabled)stage?.Invoke("Saving your video to private cloud storage…");
+   await cloudStore.SaveOriginal(p); projects[p.Id]=p; return p;
   } catch {Directory.Delete(Folder(p),true); throw;}
  }
  public IResult Media(Guid id) => projects.TryGetValue(id,out var p) ? Results.File(p.Source,Path.GetExtension(p.Source) switch {".webm"=>"video/webm",".mov"=>"video/quicktime",_=>"video/mp4"},enableRangeProcessing:true) : Results.NotFound();
- public IResult Download(Guid id,string format) {
+ public async Task<IResult> Download(Guid id,string format) {
+  if(!new[]{"mp4","srt","vtt"}.Contains(format))return Results.NotFound();
+  if(cloudStore.Enabled) {var url=await cloudStore.DownloadUrl(id,format);return url is null?Results.NotFound():Results.Redirect(url);}
   if(!projects.TryGetValue(id,out var p)||p.Output is null||!new[]{"mp4","srt","vtt"}.Contains(format)) return Results.NotFound();
   return Results.File(Path.Combine(Folder(p),"export."+format),format=="mp4"?"video/mp4":format=="vtt"?"text/vtt":"application/x-subrip","frame-export."+format);
  }
  public async Task Transcribe(Project p,string language, Action<string>? stage = null) {
+  if(!await jobs.WaitAsync(0))throw new InvalidOperationException("Another video is being processed. Try again when it finishes.");
+  try {await TranscribeCore(p,language,stage);await cloudStore.SaveProject(p);}finally{jobs.Release();}
+ }
+ async Task TranscribeCore(Project p,string language, Action<string>? stage) {
   var key=config["FRAME_AI_API_KEY"] ?? config["OPENAI_API_KEY"];
   if(string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("Set FRAME_AI_API_KEY securely in the environment to generate AI subtitles. Manual subtitles and video export are available now.");
   var model=config["FRAME_TRANSCRIPTION_MODEL"]??"gpt-4o-transcribe-diarize";
@@ -81,11 +117,16 @@ public sealed class EditorService(IHttpClientFactory clients, IConfiguration con
   using var translation=JsonDocument.Parse(resultText); var lines=translation.RootElement.GetProperty("texts").EnumerateArray().Select(x=>x.GetString()).ToArray();
   if(lines.Length!=segments.Count||lines.Any(string.IsNullOrWhiteSpace)) throw new InvalidOperationException("The AI returned incomplete subtitles. Please try again.");
   for(var i=0;i<lines.Length;i++) segments[i].Text=lines[i]!;
-  p.Segments=segments; p.Output=null;
+  p.Segments=segments; p.Output=null; p.CloudExportAvailable=false;
  }
  public async Task Export(Project p,double start,double end,int fontSize,string color) {
+  if(!await jobs.WaitAsync(0))throw new InvalidOperationException("Another video is being processed. Try again when it finishes.");
+  try {await ExportCore(p,start,end,fontSize,color);await cloudStore.SaveExports(p);}finally{jobs.Release();}
+ }
+ async Task ExportCore(Project p,double start,double end,int fontSize,string color) {
   if(!double.IsFinite(start)||!double.IsFinite(end)||start<0||end<=start||end>p.Duration+0.01) throw new InvalidOperationException("Choose valid trim points within the video duration.");
   if(fontSize is <12 or >72||!System.Text.RegularExpressions.Regex.IsMatch(color,"^#[0-9a-fA-F]{6}$")) throw new InvalidOperationException("Choose a valid subtitle size and color.");
+  p.TrimStart=start;p.TrimEnd=end;p.FontSize=fontSize;p.Color=color;
   var snapshot=p.Segments.Select(s=>new Segment{Start=s.Start,End=s.End,Text=s.Text}).ToList();
   if(snapshot.Any(s=>!double.IsFinite(s.Start)||!double.IsFinite(s.End)||s.Start<0||s.End<=s.Start||s.End>p.Duration+0.01||string.IsNullOrWhiteSpace(s.Text))) throw new InvalidOperationException("Every caption needs text and valid start/end times within the video.");
   var clipped=snapshot.Where(s=>s.End>start&&s.Start<end).OrderBy(s=>s.Start).Select(s=>new Segment{Start=Math.Max(0,s.Start-start),End=Math.Min(end,s.End)-start,Text=s.Text}).ToList();

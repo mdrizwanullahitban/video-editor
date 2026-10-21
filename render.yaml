@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: frame-video-editor
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeployTrigger: "off"
+    envVars:
+      - key: FRAME_CLOUD_MODE
+        value: "true"
+      - key: FRAME_ADMIN_PASSWORD
+        sync: false
+      - key: FRAME_AI_API_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: FRAME_STORAGE_LIMIT_BYTES
+        value: "8589934592"

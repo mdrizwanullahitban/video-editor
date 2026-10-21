@@ -27,9 +27,13 @@ dotnet run --project VideoEditor.csproj --urls http://localhost:5000
 
 Open http://localhost:5000 and keep the terminal running. Confirm `ffmpeg -version` and `ffprobe -version` work in that terminal. Install Noto Sans Devanagari for Hindi exports, then restart the app. To enable paid AI requests, set `$env:FRAME_AI_API_KEY` securely in the current terminal before starting the server; never share the value or commit it.
 
-## First-version limitations
+## Online version
 
-For a trusted local/single-user environment only. There is no account system or access control; anyone who has an asset URL can access it. Projects are in memory and media is kept in the system temporary directory (`frame-video-editor`). Restarting loses project references; delete that directory when the server is stopped to remove media. Deployments need authentication, per-user storage, cleanup quotas, a background job queue, and durable project storage before public use. AI requests require network access to `api.openai.com`. Fonts use local system fonts.
+[Deploy to Render](https://render.com/deploy?repo=https://github.com/mdrizwanullahitban/video-editor) · [Cloud setup guide](DEPLOYMENT.md)
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Render hosting, private Cloudflare R2 storage, owner sign-in, OpenAI setup, cost limits, and the remaining deployment steps. The cloud deployment is not yet live; provider accounts and credentials are required. A Docker image includes video tools and Hindi fonts so online visitors need only a browser.
+
+Without cloud settings, the app is a trusted local workspace with in-memory projects and temporary media. With `FRAME_CLOUD_MODE=true`, startup requires a password of at least 16 characters, private R2 credentials, and the AI key. R2 stores original videos, project edits, and exported files across restarts. Manual edits need the Save project button. There is one workspace owner, not a multi-user account system. Only run local mode on trusted interfaces.
 
 ## Validation
 
